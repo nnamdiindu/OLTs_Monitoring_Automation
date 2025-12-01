@@ -328,24 +328,41 @@ class OLTAutomationOrchestrator:
             for device in offline_devices:
                 self.logger.warning(f"DOWNTIME ALERT - {device['device_name']}")
 
-            # Step 2: Create tickets and pair them with devices
+            # Step 2: Group devices by name and create ONE ticket per unique device
             self.logger.info(f"[2/3] Creating tickets for offline devices...")
-            device_ticket_pairs = []  # List of (device, ticket_id) tuples
 
+            # Group devices by device name
+            from collections import defaultdict
+            device_groups = defaultdict(list)
             for device in offline_devices:
+                device_groups[device['device_name']].append(device)
+
+            self.logger.info(f"Found {len(device_groups)} unique device(s) to create tickets for")
+
+            device_ticket_map = {}  # Map device_name -> ticket_id
+
+            for device_name, devices in device_groups.items():
+                if len(devices) > 1:
+                    self.logger.warning(
+                        f"Device '{device_name}' has {len(devices)} instances offline - creating ONE ticket")
+
                 try:
-                    ticket_id = self.ticket_manager.create_ticket(device)
+                    # Create one ticket for the first instance of the device
+                    ticket_id = self.ticket_manager.create_ticket(devices[0])
                     if ticket_id:
-                        device_ticket_pairs.append((device, ticket_id))
+                        device_ticket_map[device_name] = ticket_id
                 except Exception as e:
-                    self.logger.error(f"Failed to create ticket for {device['device_name']}: {e}")
+                    self.logger.error(f"Failed to create ticket for {device_name}: {e}")
 
-
-            # Step 3: Send email notifications (one per device-ticket pair)
+            # Step 3: Send ONE email per unique device with its ticket
             self.logger.info(f"[3/3] Sending email notifications...")
             emails_sent = 0
 
-            for device, ticket_id in device_ticket_pairs:  # ✅ Iterate over the list of tuples
+            for device_name, ticket_id in device_ticket_map.items():
+                # Get one instance of the device for email details
+                device_instances = device_groups[device_name]
+                device = device_instances[0]  # Use first instance for email
+
                 if self.notifier.send_downtime_alert(
                         notification_email,
                         device,
@@ -353,7 +370,7 @@ class OLTAutomationOrchestrator:
                 ):
                     emails_sent += 1
 
-            self.logger.info(f"Sent {emails_sent}/{len(device_ticket_pairs)} email notifications")
+            self.logger.info(f"Sent {emails_sent}/{len(device_ticket_map)} email notifications")
 
             self.logger.info("=" * 60)
             self.logger.info("AUTOMATION COMPLETE")
@@ -362,14 +379,16 @@ class OLTAutomationOrchestrator:
             result = {
                 "status": "success",
                 "offline_devices": len(offline_devices),
-                "tickets_created": len(device_ticket_pairs),
-                "email_sent": emails_sent,
+                "unique_devices": len(device_groups),
+                "tickets_created": len(device_ticket_map),
+                "emails_sent": emails_sent,
                 "devices": offline_devices,
-                "device_ticket_pairs": [(d['device_name'], tid) for d, tid in device_ticket_pairs]
+                "device_ticket_map": device_ticket_map
             }
 
-            self.logger.info(f"Summary: {len(offline_devices)} devices offline, "
-                             f"{len(device_ticket_pairs)} tickets created, "
+            self.logger.info(f"Summary: {len(offline_devices)} total instances offline, "
+                             f"{len(device_groups)} unique devices, "
+                             f"{len(device_ticket_map)} tickets created, "
                              f"emails sent: {emails_sent}")
 
             return result
