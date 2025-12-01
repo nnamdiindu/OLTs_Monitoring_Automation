@@ -196,13 +196,25 @@ class TicketManager:
         """
         return message
 
-
     def _extract_ticket_id(self, response) -> Optional[str]:
         """Extract ticket ID from response"""
         try:
-            response_data = response
-            return response_data.text
-        except:
+            import re
+            # Log the raw response for debugging
+            self.logger.debug(f"Raw ticket response: {response.text}")
+
+            match = re.search(r'([A-Z]+\-\d+)', response.text)
+            if match:
+                ticket_id = match.group(1)
+                self.logger.debug(f"Extracted ticket ID: {ticket_id}")
+                return ticket_id
+
+            # Fallback: if no pattern found, return cleaned text
+            self.logger.warning(f"Could not extract ticket ID from: {response.text}")
+            return response.text.strip()
+
+        except Exception as e:
+            self.logger.error(f"Error extracting ticket ID: {e}")
             return None
 
 
@@ -228,51 +240,51 @@ class EmailNotifier:
     def send_notification(self, recipient_email: str, subject: str, body: str) -> bool:
         self.logger.info(f"Sending email to {recipient_email}")
 
-        # Create message object
-        message = MIMEMultipart()
-        message['From'] = self.sender_email
-        message['To'] = recipient_email
-        message['Subject'] = subject
+        try:
+            # Create message object
+            message = MIMEMultipart()
+            message['From'] = self.sender_email
+            message['To'] = recipient_email
+            message['Subject'] = subject
 
-        server = smtplib.SMTP(self.smtp_server, self.smtp_port, timeout=30)
-        server.starttls()
-        server.login(self.sender_email, self.sender_password)
+            # FIXED: Actually attach the body to the message
+            message.attach(MIMEText(body, 'plain'))
 
-        text = message.as_string()
-        server.sendmail(self.sender_email, recipient_email, text)
-        server.quit()
+            server = smtplib.SMTP(self.smtp_server, self.smtp_port, timeout=30)
+            server.starttls()
+            server.login(self.sender_email, self.sender_password)
 
-        self.logger.info(f"Email sent successfully to {recipient_email}")
+            text = message.as_string()
+            server.sendmail(self.sender_email, recipient_email, text)
+            server.quit()
 
-        return True
+            self.logger.info(f"Email sent successfully to {recipient_email}")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Failed to send email: {e}")
+            return False
 
     def send_downtime_alert(self, recipient_email: str,
-                            devices: List[Dict], ticket_ids: Dict[str, str]) -> bool:
-        """Send downtime alert email with device details"""
+                                       device: Dict, ticket_id: str) -> bool:
+        """Send individual downtime alert email for a single device"""
 
-        self.logger.info(f"Preparing downtime alert email for {len(devices)} device(s)")
+        self.logger.info(f"Preparing downtime alert for device: {device['device_name']}")
 
-        subject = f"SERVICE DOWNTIME NOTIFICATION - {ticket_ids} "
+        subject = f"SERVICE DOWNTIME NOTIFICATION - {device['device_name']} - #{ticket_id}"
 
         body = f"""OLT Downtime Alert
 
-Detected {len(devices)} offline device(s) at {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+Device Offline Detected at {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
-Offline Devices:
-"""
-        for device in devices:
-            ticket_id = ticket_ids.get(device['device_name'], 'N/A')
-            body += f"""
-- Device: {device['device_name']}
-  Description: {device['original_desc']}
-  Start Time: {device.get('last_offline_time', 'N/A')}
-  Ticket ID: {ticket_id}
-"""
-
-        body += """
+Device Details:
+- Device Name: {device['device_name']}
+- Description: {device['original_desc']}
+- Last Offline Time: {device.get('last_offline_time', 'N/A')}
+- Ticket ID: {ticket_id}
 
 This is an automated alert from the OLT Monitoring System.
-Please investigate and resolve the issues promptly.
+Please investigate and resolve the issue promptly.
 
 ---
 OLT Monitoring System
@@ -281,7 +293,7 @@ OLT Monitoring System
         try:
             return self.send_notification(recipient_email, subject, body)
         except Exception as e:
-            self.logger.error(f"Failed to send downtime alert after retries: {e}")
+            self.logger.error(f"Failed to send downtime alert for {device['device_name']}: {e}")
             return False
 
 
@@ -316,25 +328,32 @@ class OLTAutomationOrchestrator:
             for device in offline_devices:
                 self.logger.warning(f"DOWNTIME ALERT - {device['device_name']}")
 
-            # Step 2: Create tickets
+            # Step 2: Create tickets and pair them with devices
             self.logger.info(f"[2/3] Creating tickets for offline devices...")
-            ticket_ids = {}
+            device_ticket_pairs = []  # List of (device, ticket_id) tuples
 
             for device in offline_devices:
                 try:
                     ticket_id = self.ticket_manager.create_ticket(device)
                     if ticket_id:
-                        ticket_ids[device['device_name']] = ticket_id
+                        device_ticket_pairs.append((device, ticket_id))
                 except Exception as e:
                     self.logger.error(f"Failed to create ticket for {device['device_name']}: {e}")
 
-            # Step 3: Send email notification
-            self.logger.info(f"[3/3] Sending email notification...")
-            email_sent = self.notifier.send_downtime_alert(
-                notification_email,
-                offline_devices,
-                ticket_ids
-            )
+
+            # Step 3: Send email notifications (one per device-ticket pair)
+            self.logger.info(f"[3/3] Sending email notifications...")
+            emails_sent = 0
+
+            for device, ticket_id in device_ticket_pairs:  # ✅ Iterate over the list of tuples
+                if self.notifier.send_downtime_alert(
+                        notification_email,
+                        device,
+                        ticket_id
+                ):
+                    emails_sent += 1
+
+            self.logger.info(f"Sent {emails_sent}/{len(device_ticket_pairs)} email notifications")
 
             self.logger.info("=" * 60)
             self.logger.info("AUTOMATION COMPLETE")
@@ -343,15 +362,15 @@ class OLTAutomationOrchestrator:
             result = {
                 "status": "success",
                 "offline_devices": len(offline_devices),
-                "tickets_created": len(ticket_ids),
-                "email_sent": email_sent,
+                "tickets_created": len(device_ticket_pairs),
+                "email_sent": emails_sent,
                 "devices": offline_devices,
-                "ticket_ids": ticket_ids
+                "device_ticket_pairs": [(d['device_name'], tid) for d, tid in device_ticket_pairs]
             }
 
             self.logger.info(f"Summary: {len(offline_devices)} devices offline, "
-                             f"{len(ticket_ids)} tickets created, "
-                             f"email sent: {email_sent}")
+                             f"{len(device_ticket_pairs)} tickets created, "
+                             f"emails sent: {emails_sent}")
 
             return result
 
