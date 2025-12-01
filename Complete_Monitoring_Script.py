@@ -1,14 +1,13 @@
 import os
 import smtplib
 import requests
-import time
 import logging
 from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import List, Dict, Optional
-from functools import wraps
 import json
+from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -297,14 +296,83 @@ OLT Monitoring System
             return False
 
 
+
+class DowntimeTracker:
+    """Tracks active downtime tickets to prevent duplicates"""
+
+    def __init__(self, state_file: str = "active_downtimes.json"):
+        self.state_file = Path(state_file)
+        self.logger = logging.getLogger(self.__class__.__name__)
+        self.active_downtimes = self._load_state()
+        self.logger.info("DowntimeTracker initialized")
+
+    def _load_state(self) -> Dict:
+        """Load active downtimes from file"""
+        if self.state_file.exists():
+            try:
+                with open(self.state_file, 'r') as f:
+                    return json.load(f)
+            except Exception as e:
+                self.logger.error(f"Failed to load state: {e}")
+                return {}
+        return {}
+
+    def _save_state(self):
+        """Save active downtimes to file"""
+        try:
+            with open(self.state_file, 'w') as f:
+                json.dump(self.active_downtimes, f, indent=2)
+        except Exception as e:
+            self.logger.error(f"Failed to save state: {e}")
+
+    def has_active_ticket(self, device_name: str) -> bool:
+        """Check if device already has an active ticket"""
+        return device_name in self.active_downtimes
+
+    def get_ticket_id(self, device_name: str) -> Optional[str]:
+        """Get existing ticket ID for device"""
+        return self.active_downtimes.get(device_name, {}).get('ticket_id')
+
+    def add_downtime(self, device_name: str, ticket_id: str, timestamp: str):
+        """Record a new downtime"""
+        self.active_downtimes[device_name] = {
+            'ticket_id': ticket_id,
+            'start_time': timestamp,
+            'last_checked': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        self._save_state()
+        self.logger.info(f"Recorded downtime for {device_name} (Ticket: {ticket_id})")
+
+    def update_last_checked(self, device_name: str):
+        """Update last checked timestamp for existing downtime"""
+        if device_name in self.active_downtimes:
+            self.active_downtimes[device_name]['last_checked'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self._save_state()
+
+    def remove_downtime(self, device_name: str):
+        """Remove downtime when device comes back online"""
+        if device_name in self.active_downtimes:
+            ticket_id = self.active_downtimes[device_name]['ticket_id']
+            del self.active_downtimes[device_name]
+            self._save_state()
+            self.logger.info(f"Removed downtime for {device_name} (Ticket: {ticket_id})")
+            return ticket_id
+        return None
+
+    def get_all_active(self) -> Dict:
+        """Get all active downtimes"""
+        return self.active_downtimes.copy()
+
+
 class OLTAutomationOrchestrator:
     """Main orchestrator for OLT downtime automation"""
 
     def __init__(self, monitor: OLTMonitor, ticket_manager: TicketManager,
-                 notifier: EmailNotifier):
+                 notifier: EmailNotifier, tracker: DowntimeTracker):
         self.monitor = monitor
         self.ticket_manager = ticket_manager
         self.notifier = notifier
+        self.tracker = tracker  # Add tracker
         self.logger = logging.getLogger(self.__class__.__name__)
         self.logger.info("OLTAutomationOrchestrator initialized")
 
@@ -322,46 +390,68 @@ class OLTAutomationOrchestrator:
 
             if not offline_devices:
                 self.logger.info("No offline devices detected")
+
+                # Check if any previously offline devices are now online
+                self._check_recovered_devices()
+
                 return {"status": "success", "offline_devices": 0}
 
             self.logger.warning(f"Found {len(offline_devices)} offline device(s)")
-            for device in offline_devices:
-                self.logger.warning(f"DOWNTIME ALERT - {device['device_name']}")
 
-            # Step 2: Group devices by name and create ONE ticket per unique device
-            self.logger.info(f"[2/3] Creating tickets for offline devices...")
-
-            # Group devices by device name
+            # Step 2: Group devices and filter out those with existing tickets
             from collections import defaultdict
             device_groups = defaultdict(list)
             for device in offline_devices:
                 device_groups[device['device_name']].append(device)
 
-            self.logger.info(f"Found {len(device_groups)} unique device(s) to create tickets for")
-
-            device_ticket_map = {}  # Map device_name -> ticket_id
+            # Separate new downtimes from existing ones
+            new_downtimes = {}
+            existing_downtimes = {}
 
             for device_name, devices in device_groups.items():
-                if len(devices) > 1:
-                    self.logger.warning(
-                        f"Device '{device_name}' has {len(devices)} instances offline - creating ONE ticket")
+                if self.tracker.has_active_ticket(device_name):
+                    existing_ticket = self.tracker.get_ticket_id(device_name)
+                    existing_downtimes[device_name] = existing_ticket
+                    self.tracker.update_last_checked(device_name)
+                    self.logger.info(f"Device '{device_name}' already has ticket: {existing_ticket} - SKIPPING")
+                else:
+                    new_downtimes[device_name] = devices
+                    self.logger.warning(f"NEW DOWNTIME DETECTED - {device_name}")
 
+            if not new_downtimes:
+                self.logger.info("No new downtimes detected. All offline devices already have tickets.")
+                return {
+                    "status": "success",
+                    "offline_devices": len(offline_devices),
+                    "new_downtimes": 0,
+                    "existing_downtimes": len(existing_downtimes)
+                }
+
+            # Step 3: Create tickets ONLY for NEW downtimes
+            self.logger.info(f"[2/3] Creating tickets for {len(new_downtimes)} NEW downtime(s)...")
+
+            device_ticket_map = {}
+
+            for device_name, devices in new_downtimes.items():
                 try:
-                    # Create one ticket for the first instance of the device
                     ticket_id = self.ticket_manager.create_ticket(devices[0])
                     if ticket_id:
                         device_ticket_map[device_name] = ticket_id
+                        # Record in tracker
+                        self.tracker.add_downtime(
+                            device_name,
+                            ticket_id,
+                            devices[0].get('last_offline_time', 'N/A')
+                        )
                 except Exception as e:
                     self.logger.error(f"Failed to create ticket for {device_name}: {e}")
 
-            # Step 3: Send ONE email per unique device with its ticket
-            self.logger.info(f"[3/3] Sending email notifications...")
+            # Step 4: Send emails ONLY for NEW downtimes
+            self.logger.info(f"[3/3] Sending email notifications for NEW downtimes...")
             emails_sent = 0
 
             for device_name, ticket_id in device_ticket_map.items():
-                # Get one instance of the device for email details
-                device_instances = device_groups[device_name]
-                device = device_instances[0]  # Use first instance for email
+                device = new_downtimes[device_name][0]
 
                 if self.notifier.send_downtime_alert(
                         notification_email,
@@ -380,14 +470,15 @@ class OLTAutomationOrchestrator:
                 "status": "success",
                 "offline_devices": len(offline_devices),
                 "unique_devices": len(device_groups),
+                "new_downtimes": len(new_downtimes),
+                "existing_downtimes": len(existing_downtimes),
                 "tickets_created": len(device_ticket_map),
-                "emails_sent": emails_sent,
-                "devices": offline_devices,
-                "device_ticket_map": device_ticket_map
+                "emails_sent": emails_sent
             }
 
-            self.logger.info(f"Summary: {len(offline_devices)} total instances offline, "
-                             f"{len(device_groups)} unique devices, "
+            self.logger.info(f"Summary: {len(offline_devices)} total offline, "
+                             f"{len(new_downtimes)} NEW downtimes, "
+                             f"{len(existing_downtimes)} existing downtimes, "
                              f"{len(device_ticket_map)} tickets created, "
                              f"emails sent: {emails_sent}")
 
@@ -403,12 +494,32 @@ class OLTAutomationOrchestrator:
                 "email_sent": False
             }
 
+    def _check_recovered_devices(self):
+        """Check if any devices with active tickets have recovered"""
+        active_downtimes = self.tracker.get_all_active()
+
+        if not active_downtimes:
+            return
+
+        self.logger.info(f"Checking {len(active_downtimes)} device(s) with active tickets...")
+
+        # Get current offline devices
+        current_offline = self.monitor.get_offline_devices()
+        current_offline_names = {d['device_name'] for d in current_offline}
+
+        # Find devices that are now online
+        for device_name in list(active_downtimes.keys()):
+            if device_name not in current_offline_names:
+                ticket_id = self.tracker.remove_downtime(device_name)
+                self.logger.info(f"✓ Device '{device_name}' is BACK ONLINE (was on ticket {ticket_id})")
+
 
 def main():
-
     # Setup logging
     logger = setup_logging(log_file="olt_automation.log", level=logging.INFO)
     logger.info("Application started")
+
+
 
     try:
         # Initialize components
@@ -435,11 +546,13 @@ def main():
             smtp_port=config.SMTP_PORT
         )
 
+        # Add tracker
+        tracker = DowntimeTracker(state_file="active_downtimes.json")
+
         # Create orchestrator and run
-        orchestrator = OLTAutomationOrchestrator(monitor, ticket_manager, notifier)
+        orchestrator = OLTAutomationOrchestrator(monitor, ticket_manager, notifier, tracker)
         result = orchestrator.run(notification_email="lucky.odi@openaccessmetro.net")
 
-        # print(f"\nFinal Result: {json.dumps(result, indent=2, default=str)}")
         logger.info("Application completed successfully")
 
     except Exception as e:
