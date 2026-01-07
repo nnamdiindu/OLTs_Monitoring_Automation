@@ -115,11 +115,22 @@ class OLTMonitor:
             # Map device name
             device_name = self.device_map.get(device_code, device_code)
 
+            # Parse lastOnlineTime
+            last_online_raw = olt.get("lastOnlineTime")
+            last_offline_time = None
+            if last_online_raw:
+                try:
+                    dt = datetime.strptime(last_online_raw, "%Y-%m-%d %H:%M:%S")
+                    last_offline_time = dt.strftime("%Y-%m-%d %H:%M:%S")
+                except ValueError as e:
+                    self.logger.warning(f"Failed to parse lastOnlineTime '{last_online_raw}': {e}")
+                    last_offline_time = last_online_raw  # Use raw value as fallback
+
             device_info = {
                 "original_desc": device_desc,
                 "device_name": device_name,
                 "device_code": device_code,
-                "last_offline_time": olt.get("lastOfflineTime"),
+                "last_offline_time": last_offline_time,
                 "raw_data": olt
             }
 
@@ -148,6 +159,8 @@ class TicketManager:
         olt_name = device_info["device_name"]
         self.logger.info(f"Creating ticket for device: {olt_name}")
 
+        last_offline_time = device_info.get('last_offline_time', 'N/A')
+
         ticket_data = {
             "alert": True,
             "autorespond": True,
@@ -163,8 +176,9 @@ class TicketManager:
             "department": "4",
             "incident": "4",
             "category": "4",
-            "Start_Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "rca": "WIP"
+            "Start_Time": last_offline_time,
+            "rca": "WIP",
+            # "assignId": "t5"
         }
 
         response = requests.post(
@@ -221,9 +235,10 @@ class TicketManager:
         """Get public IP address with retry"""
         try:
             return requests.get('https://api.ipify.org', timeout=5).text
+
         except:
             self.logger.warning("Could not fetch public IP, using fallback")
-            return "154.66.246.206"
+            return "102.134.21.254"
 
 
 class EmailNotifier:
@@ -376,7 +391,7 @@ class OLTAutomationOrchestrator:
         self.logger = logging.getLogger(self.__class__.__name__)
         self.logger.info("OLTAutomationOrchestrator initialized")
 
-    def run(self, notification_email: str = "lucky.odi@openaccessmetro.net") -> Dict:
+    def run(self, notification_email: str = os.environ.get("RECIPIENT_EMAIL")) -> Dict:
         """Execute the complete automation workflow"""
 
         self.logger.info("=" * 60)
@@ -551,7 +566,7 @@ def main():
 
         # Create orchestrator and run
         orchestrator = OLTAutomationOrchestrator(monitor, ticket_manager, notifier, tracker)
-        result = orchestrator.run(notification_email="lucky.odi@openaccessmetro.net")
+        result = orchestrator.run(notification_email=os.environ.get("RECIPIENT_EMAIL"))
 
         logger.info("Application completed successfully")
 
