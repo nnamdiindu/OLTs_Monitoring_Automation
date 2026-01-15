@@ -52,7 +52,8 @@ class Config:
         "OLT": "GLO-CLS",
         "LAB": "OAM-LAB",
         "OFFICE": "OAM-OFFICE",
-        "001(10.0.4.78)": "OSBORNE"
+        "001(10.0.4.78)": "OSBORNE",
+
     }
 
 
@@ -113,7 +114,10 @@ class OLTMonitor:
                 device_code = device_desc
 
             # Map device name
-            device_name = self.device_map.get(device_code, device_code)
+            device_name = self.device_map.get(device_code, None)
+
+            if device_name is None:
+                device_name = self._format_estate_name(device_code)
 
             # Parse lastOnlineTime
             last_online_raw = olt.get("lastOnlineTime")
@@ -139,6 +143,22 @@ class OLTMonitor:
 
         return processed_devices
 
+    def _format_estate_name(self, estate_code: str) -> str:
+        """Format estate names to be more readable"""
+        # Capitalize the first letter
+        estate = estate_code.capitalize()
+
+        # Handle 'estate' suffix
+        if "estate" in estate.lower():
+            estate = estate.replace("estate", " Estate").replace("Estate", " Estate")
+
+        # Handle common patterns
+        estate = estate.replace("_", " ").replace("-", " ")
+
+        # Clean up multiple spaces
+        estate = " ".join(estate.split())
+
+        return estate
 
 class TicketManager:
     def __init__(self, base_url: str, api_key: str, timeout: int = 40):
@@ -168,13 +188,13 @@ class TicketManager:
             "name": "OLT Monitoring System",
             "email": "noc@openaccessmetro.net",
             "phone": "807-3138-700",
-            "subject": f"DOWNTIME AT {olt_name}",
+            "subject": f"Downtime at {olt_name}",
             "message": self._format_ticket_message(device_info),
             "ip": self._get_public_ip(),
             "priority": priority,
-            "topicId": "6",
+            "topicId": "5",
             "department": "4",
-            "incident": "4",
+            "incident": "2",
             "category": "4",
             "Start_Time": last_offline_time,
             "rca": "WIP",
