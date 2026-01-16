@@ -46,6 +46,9 @@ class Config:
     RETRY_DELAY = 5  # seconds
     REQUEST_TIMEOUT = 30  # seconds
 
+    # Team Scheduler Configuration
+    ROTATION_START_DATE = "2026-01-17"
+
     # Device Name Mapping
     DEVICE_NAME_MAP = {
         "16PORTOLT(10.0.4.103)": "YABACLUSTER-TEMP-16PORTOLT",
@@ -53,8 +56,110 @@ class Config:
         "LAB": "OAM-LAB",
         "OFFICE": "OAM-OFFICE",
         "001(10.0.4.78)": "OSBORNE",
-
     }
+
+class TeamScheduler:
+    # Team configuration
+    TEAMS = {
+        'Kenny': {
+            'id': 't2',
+            'offset': 0,
+            'schedule': {
+                1: 'morning', 2: 'morning',
+                3: 'evening', 4: 'evening',
+                5: 'off', 6: 'off', 7: 'off', 8: 'off'
+            }
+        },
+        'Capacity': {
+            'id': 't4',
+            'offset': 2,
+            'schedule': {
+                1: 'off', 2: 'off',
+                3: 'morning', 4: 'morning',
+                5: 'evening', 6: 'evening',
+                7: 'off', 8: 'off'
+            }
+        },
+        'GLO': {
+            'id': 't3',
+            'offset': 4,
+            'schedule': {
+                1: 'off', 2: 'off', 3: 'off', 4: 'off',
+                5: 'morning', 6: 'morning',
+                7: 'evening', 8: 'evening'
+            }
+        },
+        'Ntekim': {
+            'id': 't5',
+            'offset': 6,
+            'schedule': {
+                1: 'evening', 2: 'evening',
+                3: 'off', 4: 'off', 5: 'off', 6: 'off',
+                7: 'morning', 8: 'morning'
+            }
+        }
+    }
+
+    # Shift time boundaries
+    MORNING_SHIFT_START = 8
+    MORNING_SHIFT_END = 17
+    EVENING_SHIFT_START = 17
+    EVENING_SHIFT_END = 8
+
+    def __init__(self, start_date: str = "2026-01-17"):
+        """Initialize the team scheduler."""
+        self.start_date = datetime.strptime(start_date, "%Y-%m-%d").date()
+        self.logger = logging.getLogger(self.__class__.__name__)
+        self.logger.info(f"TeamScheduler initialized with start date: {self.start_date}")
+
+    def get_cycle_day(self, check_date: datetime) -> int:
+        """Calculate which day of the 8-day cycle we're currently in."""
+        days_since_start = (check_date.date() - self.start_date).days
+        cycle_day = (days_since_start % 8) + 1
+        return cycle_day
+
+    def get_shift_type(self, check_time: datetime) -> str:
+        """Determine if current time falls in morning or evening shift."""
+        hour = check_time.hour
+
+        # Evening shift: 17:00-23:59 or 00:00-07:59
+        if hour >= self.EVENING_SHIFT_START or hour < self.EVENING_SHIFT_END:
+            return 'evening'
+        # Morning shift: 08:00-16:59
+        elif self.MORNING_SHIFT_START <= hour < self.MORNING_SHIFT_END:
+            return 'morning'
+        else:
+            return 'evening'
+
+    def get_team_on_duty(self, check_datetime: Optional[datetime] = None) -> Optional[str]:
+        """Get the team ID that is on duty at the specified datetime."""
+        if check_datetime is None:
+            check_datetime = datetime.now()
+
+        cycle_day = self.get_cycle_day(check_datetime)
+        shift_type = self.get_shift_type(check_datetime)
+
+        self.logger.debug(f"Checking duty for {check_datetime}: Cycle Day {cycle_day}, Shift: {shift_type}")
+
+        # Check each team to find who's on duty
+        for team_name, team_config in self.TEAMS.items():
+            team_shift = team_config['schedule'][cycle_day]
+
+            if team_shift == shift_type:
+                team_id = team_config['id']
+                self.logger.info(f"Team {team_name} ({team_id}) is on duty - "
+                                 f"Cycle Day {cycle_day}, {shift_type.capitalize()} shift")
+                return team_id
+
+        self.logger.error(f"No team found on duty for Cycle Day {cycle_day}, {shift_type} shift")
+        return None
+
+    def get_team_name(self, team_id: str) -> Optional[str]:
+        """Get team name from team ID."""
+        for name, config in self.TEAMS.items():
+            if config['id'] == team_id:
+                return name
+        return None
 
 
 class OLTMonitor:
@@ -145,25 +250,21 @@ class OLTMonitor:
 
     def _format_estate_name(self, estate_code: str) -> str:
         """Format estate names to be more readable"""
-        # Capitalize the first letter
         estate = estate_code.capitalize()
 
-        # Handle 'estate' suffix
         if "estate" in estate.lower():
             estate = estate.replace("estate", " Estate").replace("Estate", " Estate")
 
-        # Handle common patterns
         estate = estate.replace("_", " ").replace("-", " ")
-
-        # Clean up multiple spaces
         estate = " ".join(estate.split())
 
         return estate
 
 class TicketManager:
-    def __init__(self, base_url: str, api_key: str, timeout: int = 40):
+    def __init__(self, base_url: str, api_key: str, team_scheduler: TeamScheduler, timeout: int = 40):
         self.base_url = base_url
         self.api_key = api_key
+        self.team_scheduler=team_scheduler
         self.timeout = timeout
         self.endpoint = f"{base_url}/api/http.php/tickets.json"
         self.headers = {
@@ -171,7 +272,7 @@ class TicketManager:
             "Content-Type": "application/json"
         }
         self.logger = logging.getLogger(self.__class__.__name__)
-        self.logger.info("TicketManager initialized")
+        self.logger.info("TicketManager initialized with TeamScheduler integration")
 
 
     def create_ticket(self, device_info: Dict, priority: str = 3) -> Optional[str]:
@@ -180,6 +281,16 @@ class TicketManager:
         self.logger.info(f"Creating ticket for device: {olt_name}")
 
         last_offline_time = device_info.get('last_offline_time', 'N/A')
+
+        # Get team on duty at current time
+        team_id = self.team_scheduler.get_team_on_duty()
+        team_name = self.team_scheduler.get_team_name(team_id)
+
+        if team_id:
+            self.logger.info(f"Assigning ticket to Team {team_name} ({team_id})")
+        else:
+            self.logger.warning("Unable to determine team on duty - ticket will not be auto-assigned")
+
 
         ticket_data = {
             "alert": True,
@@ -200,6 +311,9 @@ class TicketManager:
             "rca": "WIP",
             # "assignId": "t5"
         }
+        # Add team assignment if available
+        if team_id:
+            ticket_data["assignId"] = team_id
 
         response = requests.post(
             self.endpoint,
@@ -209,7 +323,7 @@ class TicketManager:
 
         if response.status_code == 201:
             ticket_id = self._extract_ticket_id(response)
-            self.logger.info(f"Ticket created successfully for {olt_name} (ID: {ticket_id})")
+            self.logger.info(f"Ticket created successfully for {olt_name} (ID: {ticket_id}), Assigned to Team {team_name}")
             return ticket_id
         else:
             error_msg = f"Failed to create ticket: {response.status_code} - {response.text}"
@@ -560,6 +674,9 @@ def main():
         # Initialize components
         config = Config()
 
+        # Initialize team scheduler
+        team_scheduler = TeamScheduler(start_date=config.ROTATION_START_DATE)
+
         monitor = OLTMonitor(
             api_url=config.OLT_API_URL,
             api_token=config.OLT_API_TOKEN,
@@ -571,6 +688,7 @@ def main():
         ticket_manager = TicketManager(
             base_url=config.OSTICKET_URL,
             api_key=config.OSTICKET_API_KEY,
+            team_scheduler=team_scheduler,
             timeout=config.REQUEST_TIMEOUT
         )
 
