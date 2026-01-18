@@ -2,7 +2,7 @@ import os
 import smtplib
 import requests
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import List, Dict, Optional
@@ -225,15 +225,16 @@ class OLTMonitor:
                 device_name = self._format_estate_name(device_code)
 
             # Parse lastOnlineTime
-            last_online_raw = olt.get("lastOnlineTime")
+            last_offline_raw = olt.get("lastOfflineTime")
             last_offline_time = None
-            if last_online_raw:
+            if last_offline_raw:
                 try:
-                    dt = datetime.strptime(last_online_raw, "%Y-%m-%d %H:%M:%S")
-                    last_offline_time = dt.strftime("%Y-%m-%d %H:%M:%S")
+                    dt = datetime.strptime(last_offline_raw, "%Y-%m-%d %H:%M:%S")
+                    dt_local = dt + timedelta(hours=1)
+                    last_offline_time = dt_local.strftime("%Y-%m-%d %H:%M:%S")
                 except ValueError as e:
-                    self.logger.warning(f"Failed to parse lastOnlineTime '{last_online_raw}': {e}")
-                    last_offline_time = last_online_raw  # Use raw value as fallback
+                    self.logger.warning(f"Failed to parse lastOfflineTime '{last_offline_raw}': {e}")
+                    last_offline_time = last_offline_raw  # Use raw value as fallback
 
             device_info = {
                 "original_desc": device_desc,
