@@ -538,11 +538,11 @@ class OLTAutomationOrchestrator:
             self.logger.info("[1/3] Checking for offline OLT devices...")
             offline_devices = self.monitor.get_offline_devices()
 
+            # ALWAYS check if any previously offline devices have recovered
+            self._check_recovered_devices(offline_devices)
+
             if not offline_devices:
                 self.logger.info("No offline devices detected")
-
-                # Check if any previously offline devices are now online
-                self._check_recovered_devices()
 
                 return {"status": "success", "offline_devices": 0}
 
@@ -644,7 +644,7 @@ class OLTAutomationOrchestrator:
                 "email_sent": False
             }
 
-    def _check_recovered_devices(self):
+    def _check_recovered_devices(self, current_offline_devices: List[Dict]):
         """Check if any devices with active tickets have recovered"""
         active_downtimes = self.tracker.get_all_active()
 
@@ -653,15 +653,14 @@ class OLTAutomationOrchestrator:
 
         self.logger.info(f"Checking {len(active_downtimes)} device(s) with active tickets...")
 
-        # Get current offline devices
-        current_offline = self.monitor.get_offline_devices()
-        current_offline_names = {d['device_name'] for d in current_offline}
+        # Get current offline device names
+        current_offline_names = {d["device_name"] for d in current_offline_devices}
 
         # Find devices that are now online
         for device_name in list(active_downtimes.keys()):
             if device_name not in current_offline_names:
                 ticket_id = self.tracker.remove_downtime(device_name)
-                self.logger.info(f"✓ Device '{device_name}' is BACK ONLINE (was on ticket {ticket_id})")
+                self.logger.info(f"Device '{device_name}' is BACK ONLINE (was on ticket {ticket_id})")
 
 
 def main():
