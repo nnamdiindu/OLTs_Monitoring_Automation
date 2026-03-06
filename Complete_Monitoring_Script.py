@@ -139,19 +139,26 @@ class TeamScheduler:
         cycle_day = self.get_cycle_day(check_datetime)
         shift_type = self.get_shift_type(check_datetime)
 
-        self.logger.debug(f"Checking duty for {check_datetime}: Cycle Day {cycle_day}, Shift: {shift_type}")
+        effective_cycle_day = cycle_day
+        if shift_type == 'evening' and check_datetime.hour < self.EVENING_SHIFT_END:
+            effective_cycle_day = ((cycle_day - 2) % 8) + 1
+
+        self.logger.debug(f"Checking duty for {check_datetime}: Cycle Day {cycle_day}, "
+                          f"Effective Day {effective_cycle_day}, Shift: {shift_type}")
 
         # Check each team to find who's on duty
         for team_name, team_config in self.TEAMS.items():
-            team_shift = team_config['schedule'][cycle_day]
+            team_shift = team_config['schedule'][effective_cycle_day]
 
             if team_shift == shift_type:
                 team_id = team_config['id']
                 self.logger.info(f"Team {team_name} ({team_id}) is on duty - "
-                                 f"Cycle Day {cycle_day}, {shift_type.capitalize()} shift")
+                                 f"Cycle Day {cycle_day} (Effective: {effective_cycle_day}), "
+                                 f"{shift_type.capitalize()} shift")
                 return team_id
 
-        self.logger.error(f"No team found on duty for Cycle Day {cycle_day}, {shift_type} shift")
+        self.logger.error(f"No team found on duty for Cycle Day {cycle_day} "
+                          f"(Effective: {effective_cycle_day}), {shift_type} shift")
         return None
 
     def get_team_name(self, team_id: str) -> Optional[str]:
